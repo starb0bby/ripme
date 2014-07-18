@@ -10,7 +10,7 @@ import com.rarchives.ripme.ripper.rippers.VineboxRipper;
 public class VineboxRipperTest extends RippersTest {
     
     public void testVineboxAlbums() throws IOException {
-        if (DOWNLOAD_CONTENT) {
+        if (!DOWNLOAD_CONTENT) {
             return;
         }
         List<URL> contentURLs = new ArrayList<URL>();
