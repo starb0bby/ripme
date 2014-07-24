@@ -1,21 +1,24 @@
 package com.rarchives.ripme.ripper.rippers;
 
+import com.rarchives.ripme.ripper.AbstractHTMLRipper;
+import com.rarchives.ripme.ui.RipStatusMessage;
+import com.rarchives.ripme.utils.Http;
+import com.rarchives.ripme.utils.User;
+import com.rarchives.ripme.utils.Utils;
+import java.awt.GridLayout;
 import java.io.IOException;
 import java.net.MalformedURLException;
 import java.net.URL;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-
-import org.jsoup.nodes.Document;
-import org.jsoup.nodes.Element;
-
-import com.rarchives.ripme.ripper.AbstractHTMLRipper;
-import com.rarchives.ripme.utils.Http;
-import com.rarchives.ripme.utils.User;
-import com.rarchives.ripme.utils.Utils;
-import org.apache.http.Header;
+import javax.swing.JLabel;
+import javax.swing.JOptionPane;
+import javax.swing.JPanel;
+import javax.swing.JTextField;
 import org.apache.http.HttpEntity;
 import org.apache.http.HttpResponse;
 import org.apache.http.NameValuePair;
@@ -25,6 +28,7 @@ import org.apache.http.client.methods.HttpGet;
 import org.apache.http.client.methods.HttpPost;
 import org.apache.http.client.protocol.ClientContext;
 import org.apache.http.conn.ClientConnectionManager;
+import org.apache.http.cookie.Cookie;
 import org.apache.http.impl.client.BasicCookieStore;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.impl.conn.tsccm.ThreadSafeClientConnManager;
@@ -35,11 +39,14 @@ import org.apache.http.protocol.HTTP;
 import org.apache.http.protocol.HttpContext;
 import org.apache.http.util.EntityUtils;
 import org.jsoup.Jsoup;
+import org.jsoup.nodes.Document;
+import org.jsoup.nodes.Element;
 
 public class ExposedForumsRipper extends AbstractHTMLRipper {
 
     private static final String DOMAIN = "exposedforums.com", HOST = "exposedforums";
     private static final DefaultHttpClient httpclient = getThreadSafeClient();
+    private static User user;
 
     public ExposedForumsRipper(URL url) throws IOException {
         super(url);
@@ -74,8 +81,8 @@ public class ExposedForumsRipper extends AbstractHTMLRipper {
     @Override
     public List<String> getURLsFromPage(Document doc) {
         List<String> imageURLs = new ArrayList<String>();
-        for (Element thumb : doc.select("a.highslide")) {
-            String image = thumb.attr("href");
+        for (Element thumb : doc.select("#posts > li.postcontainer fieldset.postcontent a")) {
+            String image = "http://" + getDomain() + "/forums/" + thumb.attr("href");
             imageURLs.add(image);
         }
         return imageURLs;
@@ -83,27 +90,91 @@ public class ExposedForumsRipper extends AbstractHTMLRipper {
 
     @Override
     public void downloadURL(URL url, int index) {
-        addURLToDownload(url, getPrefix(index));
+        addURLToDownload(url, getPrefix(index), "", "", user.cookies);
     }
 
     @Override
     public void rip() throws IOException {
-        String gid = getGID(this.url), theurl = "http://www.exposedforums.com/forums/showthread.php?" + gid;
-        Document doc = login(theurl, "", "");
-        logger.info(doc);
+        int index = 0;
+        logger.info("Retrieving " + this.url);
+        sendUpdate(RipStatusMessage.STATUS.LOADING_RESOURCE, this.url.toExternalForm());
+
+        String username = Utils.getConfigString("exposedforums.username", "");
+        String password = Utils.getConfigString("exposedforums.password", "");
+
+        if (username == "" || password == "") {
+            displayLoginForm();
+        }
+
+        if (user == null) {
+            user = login(Utils.getConfigString("exposedforums.username", ""), Utils.getConfigString("exposedforums.password", ""));
+        }
+        
+        Document page = accessPageUsingContext(this.url.toString(), user);
+
+        while (page != null) {
+            List<String> imageURLs = getURLsFromPage(page);
+
+            if (imageURLs.isEmpty()) {
+                throw new IOException("No images found at " + this.url);
+            }
+
+            for (String imageURL : imageURLs) {
+                if (isStopped()) {
+                    break;
+                }
+                index += 1;
+                downloadURL(new URL(imageURL), index);
+            }
+
+            if (isStopped()) {
+                break;
+            }
+
+            try {
+                sendUpdate(RipStatusMessage.STATUS.LOADING_RESOURCE, "next page");
+                page = getNextPage(page);
+            } catch (IOException e) {
+                logger.info("Can't get next page: " + e.getMessage());
+                break;
+            }
+        }
+
+        // If they're using a thread pool, wait for it.
+        if (getThreadPool() != null) {
+            getThreadPool().waitForThreads();
+        }
+        waitForThreads();
+    }
+
+    private static void displayLoginForm() {
+        JTextField username = new JTextField();
+        JTextField password = new JTextField();
+        JPanel panel = new JPanel(new GridLayout(0, 1));
+        panel.add(new JLabel("Username:"));
+        panel.add(username);
+        panel.add(new JLabel("Password:"));
+        panel.add(password);
+        int result = JOptionPane.showConfirmDialog(null, panel, "ExposedForums Credentials",
+                JOptionPane.OK_CANCEL_OPTION, JOptionPane.PLAIN_MESSAGE);
+        if (result == JOptionPane.OK_OPTION) {
+            Utils.setConfigString("exposedforums.username", username.getText());
+            Utils.setConfigString("exposedforums.password", password.getText());
+        } else {
+            System.out.println("Cancelled");
+        }
     }
 
     /**
      * Constructs and submits a POST with the appropriate parameters to login to a vbulletin.
      *
-     * @param rootURL Base or root URL for the site to log into
      * @param username User's login name
      * @param password User's password
      * @throws IOException
-     * @return Document object initialised with a HttpContext
-     * 
+     * @return User object initialised with a HttpContext
+     *
      */
-    public Document login(String rootURL, String username, String password) throws IOException {
+    public User login(String username, String password) throws IOException {
         Utils.debug("login");
 
         User ret = new User(username, password);
@@ -125,25 +196,18 @@ public class ExposedForumsRipper extends AbstractHTMLRipper {
         nvps.add(new BasicNameValuePair("cookieuser", "1"));
         httppost.setEntity(new UrlEncodedFormEntity(nvps, HTTP.UTF_8));
 
-        // execute the POST 
+        // execute the POST
         Utils.debug("Executing POST");
         HttpResponse response = httpclient.execute(httppost, localContext);
         Utils.debug("POST response: " + response.getStatusLine());
         assert response.getStatusLine().getStatusCode() == 200;
 
-        // get all headers		
-        // Header[] headers = response.getAllHeaders();
-        // for (Header header : headers) {
-        //     System.out.println("Key : " + header.getName()
-        //             + " ,Value : " + header.getValue());
-        // }
-        
-        // TODO: store the cookies
-        // http://bit.ly/e7yY5i (CookieStore javadoc)
-        Utils.printCookieStore(cookieStore);
+        // store the cookies
+        // Utils.printCookieStore(cookieStore);
+        ret.cookies = cookieStoreToMap(cookieStore);
 
-        // confirm we are logged in 
-        HttpGet httpget = new HttpGet(rootURL);
+        // confirm we are logged in
+        HttpGet httpget = new HttpGet("http://" + getDomain() + "/forums/index.php");
         response = httpclient.execute(httpget, localContext);
         HttpEntity entity = response.getEntity();
         Document page = Jsoup.parse(EntityUtils.toString(entity));
@@ -166,12 +230,35 @@ public class ExposedForumsRipper extends AbstractHTMLRipper {
         ret.vb_security_token = token_array[1];
         assert ret.vb_security_token.length() == 40;
         ret.httpContext = localContext;
-        
+
         Utils.debug("securitytoken: " + ret.vb_security_token);
         Utils.debug("Login seems ok");
         Utils.debug("end login");
-        
+
+        return ret;
+    }
+
+    public Document accessPageUsingContext(String url, User credentials) throws IOException {
+        HttpGet httpget = new HttpGet(url);
+        HttpResponse response = httpclient.execute(httpget, credentials.httpContext);
+        HttpEntity entity = response.getEntity();
+        Document page = Jsoup.parse(EntityUtils.toString(entity));
+        EntityUtils.consume(entity);
+        assert page != null;
+
         return page;
+    }
+
+    public static Map<String, String> cookieStoreToMap(CookieStore cookieStore) {
+        List<Cookie> cookies = cookieStore.getCookies();
+        Map<String, String> cookieMap = new HashMap<String, String>();
+
+        for (Cookie cookie : cookies) {
+            cookieMap.put(cookie.getName(), cookie.getValue());
+        }
+
+        return cookieMap;
+
     }
 
     public static DefaultHttpClient getThreadSafeClient() {
