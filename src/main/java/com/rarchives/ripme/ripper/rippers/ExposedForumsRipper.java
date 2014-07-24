@@ -98,15 +98,18 @@ public class ExposedForumsRipper extends AbstractHTMLRipper {
         int index = 0;
         logger.info("Retrieving " + this.url);
         sendUpdate(RipStatusMessage.STATUS.LOADING_RESOURCE, this.url.toExternalForm());
-        
+
         String username = Utils.getConfigString("exposedforums.username", "");
         String password = Utils.getConfigString("exposedforums.password", "");
-        
+
         if (username == "" || password == "") {
             displayLoginForm();
         }
+
+        if (user == null) {
+            user = login(Utils.getConfigString("exposedforums.username", ""), Utils.getConfigString("exposedforums.password", ""));
+        }
         
-        user = login(Utils.getConfigString("exposedforums.username", ""), Utils.getConfigString("exposedforums.password", ""));
         Document page = accessPageUsingContext(this.url.toString(), user);
 
         while (page != null) {
